@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
 	"github.com/segmentio/parquet-go/compress"
 	"github.com/segmentio/parquet-go/deprecated"
 	"github.com/segmentio/parquet-go/encoding"
@@ -99,14 +100,18 @@ func schemaOf(model reflect.Type) *Schema {
 func NewSchema(name string, root Node) *Schema {
 	mapping, columns := columnMappingOf(root)
 	return &Schema{
-		name:        name,
-		root:        root,
-		deconstruct: makeDeconstructFunc(root),
-		reconstruct: makeReconstructFunc(root),
-		readRow:     makeColumnReadRowFunc(root),
+		name: name,
+		root: root,
+		// deconstruct: makeDeconstructFunc(root),
+		// reconstruct: makeReconstructFunc(root),
+		// readRow: makeColumnReadRowFunc(root, nil),
 		mapping:     mapping,
 		columns:     columns,
 	}
+}
+
+func (s *Schema) MakeColumnReadRowFunc(usedFields []string) {
+	s.readRow = makeColumnReadRowFunc(s.root, usedFields)
 }
 
 func dereference(t reflect.Type) reflect.Type {
@@ -136,9 +141,41 @@ func makeReconstructFunc(node Node) (reconstruct reconstructFunc) {
 	return reconstruct
 }
 
-func makeColumnReadRowFunc(node Node) columnReadRowFunc {
-	_, readRow := columnReadRowFuncOf(node, 0, 0)
-	return readRow
+func makeColumnReadRowFunc(node Node, usedFields []string) columnReadRowFunc {
+	columnIndex := 0
+	var repetitionDepth int8 = 0
+
+	fields := node.Fields()
+
+	group := make([]columnReadRowFunc, 0, len(fields))
+	for i := range fields {
+		var curGroup columnReadRowFunc
+		columnIndex, curGroup = columnReadRowFuncOf(fields[i], columnIndex, repetitionDepth)
+		if stringSliceContains(usedFields, fields[i].Name()) {
+			group = append(group, curGroup)
+		}
+	}
+
+	return func(row Row, repetitionLevel int8, columns []columnChunkReader) (Row, error) {
+		var err error
+
+		for _, read := range group {
+			if row, err = read(row, repetitionLevel, columns); err != nil {
+				break
+			}
+		}
+
+		return row, err
+	}
+}
+
+func stringSliceContains(xs []string, y string) bool {
+	for _, x := range xs {
+		if x == y {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfigureRowGroup satisfies the RowGroupOption interface, allowing Schema
